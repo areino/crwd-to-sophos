@@ -43,7 +43,7 @@ These three files must live in the same folder and be packaged together:
 scripts/
   migrate.ps1      <- migration script (do not rename)
   config.json      <- settings you edit before packaging
-  SophosSetup.exe  <- Sophos installer from your Sophos admin console
+  SophosSetup.exe  <- Sophos installer from your Sophos or Taegis admin console
 ```
 
 The script locates `config.json` and the installer relative to its own location, so the folder structure above must be preserved inside the `.intunewin` archive.
@@ -52,13 +52,14 @@ The script locates `config.json` and the installer relative to its own location,
 
 ## Before you start
 
-- **Sophos installer** — download `SophosSetup.exe` from your Sophos Central console:
-  _Sophos Central > Devices > Installers > Download installer for Windows_.
+- **Sophos installer** — download `SophosSetup.exe` from your Sophos Central or Taegis XDR console:
+  _Sophos Central > Endpoint Agents > Downloads > Download installer for Windows_.
+  _Taegis XDR > Devices > Installers > Download installer for Windows_.
   Place it in the `scripts/` folder alongside `migrate.ps1`.
 
-- **Falcon maintenance token** (if required) — if your Falcon policy has _Sensor Tampering Protection_ enabled, uninstallation requires a maintenance token. Retrieve it from the Falcon console:
-  _Host Management > select a host > Reveal Maintenance Token_.
-  You will add this token to `config.json` in the next step.
+- **Falcon Sensor Update Policy** — Make sure the endpoints to migrate are in a Falcon hostgroup with a Sensor Update Policy which has "Uninstall and mainenance protection" DISABLED.
+
+- **Falcon Prevention Policy** — Make sure the endpoints to migrate are in a Falcon hostgroup with a Windows Prevention Policy which has "Quarantine and Security Center Registration" DISABLED.
 
 - **Microsoft Win32 Content Prep Tool** — download from
   https://github.com/microsoft/Microsoft-Win32-Content-Prep-Tool
