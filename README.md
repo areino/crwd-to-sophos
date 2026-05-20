@@ -1,119 +1,108 @@
-# Falcon to Sophos Migration — Intune Deployment Package
+# Multiestate Collector
 
-Silently migrates endpoint protection from CrowdStrike Falcon Sensor to Sophos on Windows 10/11 x64.
-Designed to be deployed as a **Microsoft Intune Win32 app**.
+Middleware-style collector: **many Sophos Central SIEM estates** → **one Taegis XDR tenant** via JSONL batches and the [Taegis File Upload API](https://docs.taegis.secureworks.com/apis/using_file_upload_api/).
 
----
+Everything ships as a **single Python script**: `multiestate_collector.py` (plus `examples/config.json`, `requirements.txt`, and tests).
 
-## Package contents
-
-| File | Purpose |
-|---|---|
-| `migrate.ps1` | Migration script |
-| `config.json` | Settings (installer filename, install args, timeouts) |
-| `SophosSetup.exe` | Sophos installer — obtain from your Sophos admin console |
-
-All three files must be in the same folder. The script locates the installer and config relative to its own location (`$PSScriptRoot`).
+References: [Sophos SIEM events](https://developer.sophos.com/docs/siem-v1/1/routes/events/get), [Taegis rate limits](https://docs.taegis.secureworks.com/apis/using_xdr_apis/).
 
 ---
 
-## What the script does
+## Requirements
 
-1. **Checks Sophos is not already installed.** If a Sophos service is already running, the script exits cleanly without making any changes.
-2. **Installs Sophos silently** using the installer filename and arguments from `config.json`.
-3. **Waits for a Sophos service to start** (default: 10 minutes, polling every 15 seconds).
-4. **Aborts if Sophos does not start in time** — Falcon is left running and the endpoint stays protected.
-5. **Uninstalls CrowdStrike Falcon** via `msiexec`. The product GUID is read from the Windows registry at runtime so the script works across all Falcon Sensor versions without hardcoding. Silent flags are taken from `config.json`.
-6. **Waits for Falcon to be fully removed** from the registry and services (default: 10 minutes).
-7. **Aborts if Falcon is not gone in time** and logs an error.
-8. **Reports all running Sophos processes** (name, PID, executable path) so the final state can be confirmed in logs.
-
-The endpoint is **never left without protection**: Falcon is only removed after Sophos is confirmed running.
+- Python **3.11+**
+- Dependencies: `pip install -r requirements.txt` (`httpx`, `pydantic`, `boto3` for S3 / Lambda)
 
 ---
 
-## config.json reference
+## Run
 
-```json
-{
-    "SophosInstallerFileName": "SophosSetup.exe",
-    "SophosInstallArgs": "--quiet",
-    "SophosTimeoutSeconds": 600,
+You must pass **exactly one** of `--once`, `--loop`, or `--lambda`.
 
-    "CrowdStrikeUninstallArgs": "/qn /norestart",
-    "CrowdStrikeTimeoutSeconds": 600
-}
+```bash
+cd C:\git\multiestate-collector
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python multiestate_collector.py --config examples\config.json --once
 ```
 
-| Field | Description |
-|---|---|
-| `SophosInstallerFileName` | Filename of the Sophos installer in the package folder |
-| `SophosInstallArgs` | Arguments passed to the Sophos installer. `--quiet` suppresses the UI. Add your Sophos registration token here if required by your product (e.g. `--quiet --token=XXXX`) |
-| `SophosTimeoutSeconds` | Seconds to wait for a Sophos service to appear after install. Default: 600 (10 min) |
-| `CrowdStrikeUninstallArgs` | Arguments appended to `msiexec /X {GUID}`. If your Falcon policy requires a maintenance token to allow uninstall, add it here: `/qn /norestart MAINTENANCE_TOKEN=your-token-here` |
-| `CrowdStrikeTimeoutSeconds` | Seconds to wait for Falcon to disappear from the registry and services after uninstall. Default: 600 (10 min) |
+Daemon mode (sleeps `poll_interval_seconds` from JSON between cycles; **local** `state_dir` / `spool_dir`):
+
+```bash
+python multiestate_collector.py --config examples\config.json --loop
+```
+
+Single cycle with **S3** for state and spool (same code path as Lambda; config must include `s3`):
+
+```bash
+python multiestate_collector.py --config path\to\config-with-s3.json --lambda
+```
 
 ---
 
-## Deploying via Intune
+## AWS Lambda
 
-### 1. Package the files
+- **Handler:** `multiestate_collector.lambda_handler`
+- **Config:** optional env **`MULTIESTATE_CONFIG_JSON`** (full JSON), **or** **`event["config_path"]`** / **`MULTIESTATE_CONFIG`** / **`CONFIG_PATH`** for a file path on Lambda (e.g. **`config.json`** packaged with `scripts/package-lambda.ps1 -ConfigPath …`).
+- **Persistence:** the config **must** include an **`s3`** object (`bucket`, optional `prefix`, optional `region`). Cursors, circuit breakers, `health.json`, and pending JSONL batches are stored under that bucket; `state_dir` / `spool_dir` are not used when `use_s3` is true.
 
-Create a `.intunewin` package from the scripts folder using the [Microsoft Win32 Content Prep Tool](https://github.com/microsoft/Microsoft-Win32-Content-Prep-Tool):
+**S3 key layout** (prefix is normalized to a single trailing slash; default in schema is `multiestate/`):
 
-```
-IntuneWinAppUtil.exe -c .\scripts -s migrate.ps1 -o .\output
-```
+| Purpose        | Key pattern                                      |
+|----------------|--------------------------------------------------|
+| Cursor         | `{prefix}state/cursors/{estate_key}.json`      |
+| Circuit breaker| `{prefix}state/breakers/{estate_key}.json`     |
+| Health         | `{prefix}state/health.json`                      |
+| Spool batches  | `{prefix}spool/*.log`                            |
 
-### 2. Create the Win32 app in Intune
-
-| Setting | Value |
-|---|---|
-| Install command | `powershell.exe -ExecutionPolicy Bypass -File migrate.ps1` |
-| Uninstall command | (not applicable — leave a no-op, e.g. `cmd /c exit 0`) |
-| Install behavior | System |
-| Device restart behavior | Determine behavior based on return codes |
-| Return code 3010 | Soft reboot (Falcon removed, reboot pending) |
-
-### 3. Detection rule
-
-Use a **Registry** detection rule:
-
-| Field | Value |
-|---|---|
-| Key path | `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` |
-| Detection method | Key exists |
-
-Or use a **Script** detection rule that checks for a running Sophos service and the absence of `CSFalconService`.
-
-### 4. Assignments
-
-Assign to a device group. Target the group containing endpoints that currently run Falcon and should be migrated.
+Grant the execution role **`s3:GetObject`**, **`s3:PutObject`**, **`s3:DeleteObject`**, and **`s3:ListBucket`** (scoped to `arn:aws:s3:::bucket-name` and `arn:aws:s3:::bucket-name/{prefix}*` as appropriate). See `examples/lambda-config.example.json` for a full JSON shape including `s3`.
 
 ---
 
-## Logs and troubleshooting
+## Configuration
 
-Every run writes a timestamped transcript to:
+Edit `examples/config.json` (or copy it). For Lambda or `--lambda`, add **`s3`** and see `examples/lambda-config.example.json`. Environment overrides use `MULTIESTATE_*` and nested `MULTIESTATE_PARENT__CHILD`, same as before (see inline `load_config` in `multiestate_collector.py`).
 
+Per-event metadata for Taegis parsers: **`estate_name`**, **`estate_tenant_id`**, **`pulled_at`**.
+
+---
+
+## State & health
+
+**Local (`--once` / `--loop`):**
+
+- `state_dir`: cursors + per-estate circuit breaker JSON
+- `spool_dir`: batched events (JSON lines in plain-text files, `*.log`) pending Taegis upload
+- `state_dir/health.json`: last successful Sophos pull per tenant, last Taegis upload, spool depth
+
+**S3 (`--lambda` / `lambda_handler`):** same logical data under `{prefix}state/…` and `{prefix}spool/…` in the configured bucket (see table above).
+
+---
+
+## Operations
+
+Host the script with a process supervisor (systemd, Windows Service, Nomad, etc.). For local runs, persist `state_dir` and `spool_dir` on disk. For Lambda, rely on S3 durability for state and spool. Keep secrets out of git (inject via env or secret store).
+
+If Sophos volume risks exceeding the **~24h SIEM window**, lower `poll_interval_seconds` or tune `max_pages_per_estate_per_cycle` / concurrency carefully.
+
+### Taegis presign `400 Bad Request`
+
+The [File Upload API](https://docs.taegis.secureworks.com/apis/using_file_upload_api/) documents only `file_name`, `content_length`, and optional `sensor_id` on `POST …/s3-signer/v2/signed-s3url`. This script therefore **omits** optional `service` / `sensor_id` query parameters unless you set them in `taegis` in JSON. Spool files use a **`.log`** suffix (content is still JSON lines) because some stacks reject presign for non–plain-text extensions.
+
+If presign still fails, the error line now includes the **response body** from Taegis. You can try `sensor_id` like `yourname.localhost`, or set `service` only if your tenant documentation requires a specific value.
+
+---
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
-C:\Users\<user>\AppData\Local\Temp\migrate-YYYYMMDD-HHmmss.log
-```
 
-When running as SYSTEM (Intune), the path is:
+---
 
-```
-C:\Windows\Temp\migrate-YYYYMMDD-HHmmss.log
-```
+## License
 
-The log contains every step with timestamps and exit codes. Check this file first when troubleshooting a failed deployment.
-
-### Common failures
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `Sophos installer not found` | `SophosInstallerFileName` in config does not match the actual filename in the package | Correct the filename in `config.json` |
-| `Sophos did not start within Ns` | Installer ran but Sophos services did not come up | Increase `SophosTimeoutSeconds`; check Sophos install logs in `%TEMP%` |
-| `msiexec exited with code 1605` | Script is running as 32-bit and resolved the wrong msiexec | The script handles this automatically via `Sysnative`; if still failing, verify Falcon is installed on the target machine |
-| `msiexec exited with code 1603` | Falcon maintenance token required | Add `MAINTENANCE_TOKEN=your-token` to `CrowdStrikeUninstallArgs` in `config.json` |
-| `Falcon was not fully removed within Ns` | Reboot required to complete driver removal | Increase `CrowdStrikeTimeoutSeconds` or handle return code 3010 as a soft reboot in Intune |
+MIT — see `LICENSE`.
