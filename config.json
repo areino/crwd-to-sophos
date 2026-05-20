@@ -1,0 +1,8 @@
+{
+    "SophosInstallerFileName": "SophosSetup.exe",
+    "SophosInstallArgs": "--quiet",
+    "SophosTimeoutSeconds": 600,
+
+    "CrowdStrikeUninstallArgs": "/qn /norestart",
+    "CrowdStrikeTimeoutSeconds": 600
+}
