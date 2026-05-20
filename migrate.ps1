@@ -93,7 +93,7 @@ function Get-FalconRegistryEntry {
     foreach ($root in $roots) {
         $entry = Get-ChildItem $root -ErrorAction SilentlyContinue |
             Get-ItemProperty -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -match "CrowdStrike|Falcon" } |
+            Where-Object { $_.DisplayName -match "CrowdStrike Sensor Platform" } |
             Select-Object -First 1
         if ($entry) { return $entry }
     }
