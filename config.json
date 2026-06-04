@@ -4,5 +4,8 @@
     "SophosTimeoutSeconds": 600,
 
     "CrowdStrikeUninstallArgs": "/qn /norestart",
-    "CrowdStrikeTimeoutSeconds": 600
+    "CrowdStrikeTimeoutSeconds": 600,
+
+    "TaegisUninstallArgs": "/qn /norestart",
+    "TaegisTimeoutSeconds": 600
 }

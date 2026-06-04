@@ -1,6 +1,6 @@
-# Falcon to Sophos Migration — Intune Deployment Guide
+# Falcon + Taegis to Sophos Migration — Intune Deployment Guide
 
-Silently migrates endpoint protection from CrowdStrike Falcon Sensor to Sophos on Windows 10/11 x64.
+Silently migrates endpoint protection from CrowdStrike Falcon Sensor and Secureworks Taegis Agent to Sophos on Windows 10/11 x64.
 
 ---
 
@@ -29,7 +29,10 @@ The script follows a strict order that ensures the endpoint is **never left with
 5. Uninstall CrowdStrike Falcon silently. The product GUID is read from the Windows registry at runtime, so the script works across all Falcon Sensor versions without any hardcoding.
 6. Wait for Falcon to disappear from the registry and services (up to `CrowdStrikeTimeoutSeconds`).
 7. **If Falcon does not disappear — log an error** and exit non-zero.
-8. Report all running Sophos processes (name, PID, path) to confirm success.
+8. Uninstall Taegis Agent silently. GUID is also looked up from the registry at runtime. A Taegis-specific uninstall log is written to `C:\ProgramData\SecureWorks\TaegisAgentUninstall.txt`.
+9. Wait for Taegis to disappear from the registry and services (up to `TaegisTimeoutSeconds`).
+10. **If Taegis does not disappear — log an error** and exit non-zero.
+11. Report all running Sophos processes (name, PID, path) to confirm success.
 
 A full timestamped transcript is written to disk on every run — see [Logs and troubleshooting](#logs-and-troubleshooting).
 
@@ -43,7 +46,7 @@ These three files must live in the same folder and be packaged together:
 scripts/
   migrate.ps1      <- migration script (do not rename)
   config.json      <- settings you edit before packaging
-  SophosSetup.exe  <- Sophos installer from your Sophos or Taegis admin console
+  SophosSetup.exe  <- Sophos installer from your Sophos admin console
 ```
 
 The script locates `config.json` and the installer relative to its own location, so the folder structure above must be preserved inside the `.intunewin` archive.
@@ -52,14 +55,17 @@ The script locates `config.json` and the installer relative to its own location,
 
 ## Before you start
 
-- **Sophos installer** — download `SophosSetup.exe` from your Sophos Central or Taegis XDR console:
-  _Sophos Central > Endpoint Agents > Downloads > Download installer for Windows_.
-  _Taegis XDR > Devices > Installers > Download installer for Windows_.
+- **Sophos installer** — download `SophosSetup.exe` from your Sophos Central console:
+  _Sophos Central > Devices > Installers > Download installer for Windows_.
   Place it in the `scripts/` folder alongside `migrate.ps1`.
 
-- **Falcon Sensor Update Policy** — Make sure the endpoints to migrate are in a Falcon hostgroup with a Sensor Update Policy which has "Uninstall and mainenance protection" DISABLED.
+- **Falcon maintenance token** (if required) — if your Falcon policy has _Sensor Tampering Protection_ enabled, uninstallation requires a maintenance token. Retrieve it from the Falcon console:
+  _Host Management > select a host > Reveal Maintenance Token_.
+  You will add this token to `config.json` in the next step.
 
-- **Falcon Prevention Policy** — Make sure the endpoints to migrate are in a Falcon hostgroup with a Windows Prevention Policy which has "Quarantine and Security Center Registration" DISABLED.
+- **Taegis uninstall token** (if required) — if your Taegis Agent Group Policy has _Tamper Protection_ enabled, uninstallation requires an uninstall token. Retrieve it from the XDR console:
+  _Endpoint Agents > Agent Settings > Tamper Protection > copy token_.
+  You will add this token to `config.json` in the next step.
 
 - **Microsoft Win32 Content Prep Tool** — download from
   https://github.com/microsoft/Microsoft-Win32-Content-Prep-Tool
@@ -80,7 +86,10 @@ Open `config.json` and edit the values for your environment before packaging.
     "SophosTimeoutSeconds": 600,
 
     "CrowdStrikeUninstallArgs": "/qn /norestart",
-    "CrowdStrikeTimeoutSeconds": 600
+    "CrowdStrikeTimeoutSeconds": 600,
+
+    "TaegisUninstallArgs": "/qn /norestart",
+    "TaegisTimeoutSeconds": 600
 }
 ```
 
@@ -119,6 +128,20 @@ Without the token, msiexec will return exit code **1603** and the uninstall will
 **`CrowdStrikeTimeoutSeconds`**
 How long (in seconds) to wait for Falcon to disappear from the registry and services after the uninstall command completes.
 Falcon's kernel driver removal may require a reboot on some versions — if you see timeouts here, consider increasing this value and handling return code 3010 in Intune as a soft reboot.
+Default: `600` (10 minutes)
+
+**`TaegisUninstallArgs`**
+Arguments appended to `msiexec /X {GUID}` when removing the Taegis Agent.
+`/qn` = fully silent (no UI). `/norestart` = suppress automatic reboot.
+
+If your Taegis Agent Group Policy has Tamper Protection enabled, add the uninstall token here. Retrieve the token from the XDR console under **Agent Settings > Tamper Protection**:
+```json
+"TaegisUninstallArgs": "/qn /norestart TOKEN=your-token-here"
+```
+Without the token, msiexec will return exit code **1603** and the uninstall will fail. A detailed Taegis uninstall log is always written to `C:\ProgramData\SecureWorks\TaegisAgentUninstall.txt` regardless of success or failure.
+
+**`TaegisTimeoutSeconds`**
+How long (in seconds) to wait for the Taegis Agent to disappear from the registry and services.
 Default: `600` (10 minutes)
 
 ---
@@ -222,7 +245,7 @@ Detection tells Intune whether the app is already installed. Use a **Custom scri
 | Enforce script signature check | No |
 | Run this script using the logged on credentials | No |
 
-**detect.ps1** — the app is considered installed when Sophos is running AND Falcon is gone:
+**detect.ps1** — the app is considered installed when Sophos is running AND both Falcon and Taegis are gone:
 
 ```powershell
 $sophos = Get-Service -DisplayName "Sophos*" -ErrorAction SilentlyContinue |
@@ -231,7 +254,11 @@ $sophos = Get-Service -DisplayName "Sophos*" -ErrorAction SilentlyContinue |
 
 $falcon = Get-Service -Name "CSFalconService" -ErrorAction SilentlyContinue
 
-if ($sophos -and (-not $falcon -or $falcon.Status -eq "Stopped")) {
+$taegis = Get-Service -DisplayName "Taegis*" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Status -ne "Stopped" } |
+              Select-Object -First 1
+
+if ($sophos -and (-not $falcon -or $falcon.Status -eq "Stopped") -and (-not $taegis)) {
     Write-Host "Detected"
     exit 0
 }
@@ -329,8 +356,10 @@ Collect the log remotely via Intune: **Devices > select device > Collect diagnos
 | `config.json not found` | The `.intunewin` package was built from the wrong folder, or `config.json` was not included | Rebuild the package from the `scripts/` folder that contains all three files |
 | `Sophos installer not found` | `SophosInstallerFileName` in `config.json` does not match the actual filename | Correct the filename, rebuild, and redeploy |
 | `Sophos did not start within Ns` | Installer ran but Sophos services did not come up in time | Increase `SophosTimeoutSeconds`; check `%TEMP%\Sophos*.log` on the device for Sophos-side errors |
-| msiexec exit code `1605` | 32-bit msiexec was used and cannot see 64-bit Falcon product | Ensure **Run as 32-bit process** is set to **No** in Intune; the script includes a Sysnative fallback but the Intune setting overrides it |
-| msiexec exit code `1603` | Falcon Sensor Tampering Protection is enabled and no maintenance token was provided | Add `MAINTENANCE_TOKEN=your-token-here` to `CrowdStrikeUninstallArgs` in `config.json` |
+| msiexec exit code `1605` | 32-bit msiexec was used and cannot see 64-bit Falcon or Taegis product | Ensure **Run as 32-bit process** is set to **No** in Intune; the script includes a Sysnative fallback but the Intune setting overrides it |
+| msiexec exit code `1603` (Falcon) | Falcon Sensor Tampering Protection is enabled and no maintenance token was provided | Add `MAINTENANCE_TOKEN=your-token-here` to `CrowdStrikeUninstallArgs` in `config.json` |
+| msiexec exit code `1603` (Taegis) | Taegis Tamper Protection is enabled and no uninstall token was provided | Retrieve the token from XDR > Agent Settings > Tamper Protection and add `TOKEN=your-token-here` to `TaegisUninstallArgs` in `config.json` |
 | msiexec exit code `1618` | Another MSI installation is already in progress on the device | Intune will retry; if persistent, check for stuck Windows Update or other deployment |
 | `Falcon was not fully removed within Ns` | Falcon driver removal requires a reboot to complete | Allow Intune to process the `3010` return code as a soft reboot; increase `CrowdStrikeTimeoutSeconds` as a short-term workaround |
+| `Taegis Agent was not fully removed within Ns` | Taegis service or driver removal is taking longer than expected | Increase `TaegisTimeoutSeconds`; check `C:\ProgramData\SecureWorks\TaegisAgentUninstall.txt` for details |
 | Detection rule keeps triggering reinstall | `detect.ps1` is not returning exit 0 | Run `detect.ps1` manually on the device as SYSTEM (use PsExec: `psexec -s powershell`) and check its output |
