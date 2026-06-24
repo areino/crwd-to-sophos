@@ -6,6 +6,9 @@
     "CrowdStrikeUninstallArgs": "/qn /norestart",
     "CrowdStrikeTimeoutSeconds": 600,
 
+    "CrowdStrikeCSUninstallTool": "CsUninstallTool.exe",
+    "CrowdStrikeCSUninstallToolArgs": "/quiet",
+
     "TaegisUninstallArgs": "/qn /norestart",
     "TaegisTimeoutSeconds": 600
 }
